@@ -1,0 +1,93 @@
+version: 2
+jobs:
+  pre:
+    working_directory: ~/cci-test
+    docker:
+      - image: circleci/node:8.1.4
+    steps:
+      - checkout
+      - run: git clone git@github.com:Rise-Vision/private-keys.git
+      - run: mv private-keys ..
+      - run: gcloud auth activate-service-account 452091732215@developer.gserviceaccount.com --key-file ../private-keys/storage-server/rva-media-library-ce0d2bd78b54.json
+      - run: echo "pre job complete"
+  post:
+    working_directory: ~/cci-test
+    docker:
+      - image: circleci/node:8.1.4
+    steps:
+      - checkout
+      - run: echo "post job complete"
+  staging:
+    docker:
+      - image: circleci/node:8.1.4
+    filters:
+      branches:
+        only:
+          - /(feature|fix|chore).*/
+    steps:
+      - checkout
+      - run: sudo npm install bower -g
+      - run: bower install
+      - run: npm install
+      - run: sudo npm install gulp -g
+      - run:
+          name: Build project
+          command: gulp build
+      - run: >
+            {
+              client_secret=$(cat ../private-keys/client-authentication/tokens.txt | grep client_secret)
+              refresh_token=$(cat ../private-keys/client-authentication/tokens.txt | grep refresh_token)
+              if [ -z "$client_secret" -o -z "$refresh_token" ]; then
+                echo "Missing client secret and refresh token";
+                exit 1;
+              fi
+              # getting access token
+              access_token=$(curl -s --data ""  "https://www.googleapis.com/oauth2/v3/token?client_id=614513768474.apps.googleusercontent.com&${client_secret}&${refresh_token}&grant_type=refresh_token" | python -c "import json,sys;obj=json.load(sys.stdin);print obj['access_token'];");
+              # asking for upload url for index.html
+              curl --data "" -H "Authorization:Bearer $access_token" "https://storage-dot-rvaserver2.appspot.com/_ah/api/storage/v0.01/getUploadURI?companyId=${COMPANY_ID}&fileName=${FOLDER}%2Fstaging%2Findex.html";
+              # asking for upload url for art.html
+              curl --data "" -H "Authorization:Bearer $access_token" "https://storage-dot-rvaserver2.appspot.com/_ah/api/storage/v0.01/getUploadURI?companyId=${COMPANY_ID}&fileName=${FOLDER}%2Fstaging%2Fart.html";
+              # asking for upload url for history.html
+              curl --data "" -H "Authorization:Bearer $access_token" "https://storage-dot-rvaserver2.appspot.com/_ah/api/storage/v0.01/getUploadURI?companyId=${COMPANY_ID}&fileName=${FOLDER}%2Fstaging%2Fhistory.html";
+              # asking for upload url for build folder
+              find "build" -mindepth 1 -maxdepth 10 -type f -print0 | xargs -0 -I {} curl --data "" -H "Authorization:Bearer $access_token" "https://storage-dot-rvaserver2.appspot.com/_ah/api/storage/v0.01/getUploadURI?companyId=${COMPANY_ID}&fileName=${FOLDER}%2Fstaging%2F{}"
+            }
+      - run: gsutil -m cp index.html gs://risemedialibrary-${COMPANY_ID}/${FOLDER}/staging
+      - run: gsutil -m cp art.html gs://risemedialibrary-${COMPANY_ID}/${FOLDER}/staging
+      - run: gsutil -m cp history.html gs://risemedialibrary-${COMPANY_ID}/${FOLDER}/staging
+      - run: gsutil -m cp -r build gs://risemedialibrary-${COMPANY_ID}/${FOLDER}/staging
+      - run: gsutil -m setmeta -r -h "Cache-Control:private, max-age=0" gs://risemedialibrary-${COMPANY_ID}/${FOLDER}/staging
+      - run: gsutil acl -r ch -u AllUsers:R gs://risemedialibrary-${COMPANY_ID}/${FOLDER}/staging
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - cci-test/*
+      - run: echo "Staging completed"
+  production:
+    working_directory: ~/cci-test
+    docker:
+      - image: circleci/node:8.1.4
+    filters:
+      branches:
+        only:
+          - master
+    steps:
+      - checkout
+      # - run:
+      #     name: Build project
+      #     command: gulp build
+      - run: echo "Production test completed"
+workflows:
+  version: 2
+  staging_and_production:
+    jobs:
+      - pre
+      - post:
+          requires:
+            - pre
+      - staging:
+          requires:
+            - post
+      # - production:
+      #     requires:
+      #       - post
